@@ -1,35 +1,59 @@
 import axios from 'axios';
 
+function formatHHMM(date, { hour12 = false, timeZone } = {}) {
+  try {
+    return new Intl.DateTimeFormat('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12,
+      timeZone, // e.g., 'Africa/Accra' if you want a fixed TZ
+    }).format(date);
+  } catch {
+    const hh = String(date.getHours()).padStart(2, '0');
+    const mm = String(date.getMinutes()).padStart(2, '0');
+    return `${hh}:${mm}`;
+  }
+}
+
 export default async function handler(req, res) {
-  const { origin, destination } = req.query;
+  const { origin, destination, tz, h12 } = req.query;
   if (!origin || !destination) {
     return res.status(400).json({ error: 'Missing origin or destination' });
   }
   try {
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
-    // Example: get multiple route alternatives from Google Directions
     const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}&alternatives=true&departure_time=now&key=${apiKey}`;
     const response = await axios.get(url);
-    // Rank routes by duration and proximity (shortest duration first)
+
     const routes = (response.data.routes || []).map((route, idx) => {
       const leg = route.legs?.[0];
-      const durationSeconds = Number.isFinite(leg?.duration?.value) ? leg.duration.value : Infinity;
+
+      const durationSeconds = Number.isFinite(leg?.duration?.value) ? leg.duration.value : null;
       const distanceMeters = Number.isFinite(leg?.distance?.value) ? leg.distance.value : null;
-      
-      // Calculate estimated arrival time
+
       const now = new Date();
-      const arrivalTime = new Date(leg?.arrival_time?.value ? leg.arrival_time.value * 1000 : now.getTime() + durationSeconds * 1000);
-      
-      // Calculate traffic information
+      const baseMs =
+        Number.isFinite(leg?.arrival_time?.value)
+          ? leg.arrival_time.value * 1000
+          : Number.isFinite(durationSeconds)
+            ? now.getTime() + durationSeconds * 1000
+            : now.getTime();
+
+      const arrivalTime = new Date(baseMs);
+
+      // Preferred formatting: HH:MM with no seconds
+      const text_24h = formatHHMM(arrivalTime, { hour12: false, timeZone: tz });
+      const text_12h = formatHHMM(arrivalTime, { hour12: true, timeZone: tz });
+      // If caller passed h12=1, use 12-hour for the default text; otherwise 24-hour
+      const text = h12 === '1' ? text_12h : text_24h;
+
       const durationInTraffic = leg?.duration_in_traffic?.value;
       const normalDuration = leg?.duration?.value;
-      const hasTraffic = durationInTraffic && normalDuration && durationInTraffic > normalDuration;
+      const hasTraffic = Number.isFinite(durationInTraffic) && Number.isFinite(normalDuration) && durationInTraffic > normalDuration;
       const trafficDelay = hasTraffic ? Math.round((durationInTraffic - normalDuration) / 60) : 0;
-      
-      // Generate traffic message
+
       let trafficMessage = '';
       let trafficSeverity = 'none';
-      
       if (hasTraffic) {
         if (trafficDelay <= 5) {
           trafficMessage = 'Light traffic - minimal delays expected';
@@ -45,7 +69,7 @@ export default async function handler(req, res) {
         trafficMessage = 'Clear roads - no significant delays';
         trafficSeverity = 'clear';
       }
-      
+
       return {
         name: route.summary || `Route ${idx + 1}`,
         origin,
@@ -53,14 +77,16 @@ export default async function handler(req, res) {
         distance: leg?.distance?.text,
         distance_meters: distanceMeters,
         duration: leg?.duration?.text,
-        duration_seconds: durationSeconds,
+        duration_seconds: Number.isFinite(leg?.duration?.value) ? leg.duration.value : null,
         arrival_time: {
-          text: leg?.arrival_time?.text || arrivalTime.toLocaleTimeString(),
+          text,             // strictly HH:MM (either 24h or 12h per h12 flag)
+          text_24h,
+          text_12h,
           timestamp: arrivalTime.getTime(),
           iso: arrivalTime.toISOString()
         },
         traffic: {
-          has_traffic: hasTraffic,
+          has_traffic: !!hasTraffic,
           delay_minutes: trafficDelay,
           message: trafficMessage,
           severity: trafficSeverity,
@@ -73,11 +99,10 @@ export default async function handler(req, res) {
         ...route
       };
     });
-    routes.sort((a, b) => a.duration_seconds - b.duration_seconds);
+
+    routes.sort((a, b) => (a.duration_seconds ?? Infinity) - (b.duration_seconds ?? Infinity));
     res.status(200).json({ routes });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch routes' });
   }
 }
-
-// durationSeconds helper removed in favor of Google's numeric duration.value
