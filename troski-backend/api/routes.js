@@ -1,22 +1,7 @@
 import axios from 'axios';
 
-function formatHHMM(date, { hour12 = false, timeZone } = {}) {
-  try {
-    return new Intl.DateTimeFormat('en-GB', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12,
-      timeZone, // e.g., 'Africa/Accra' if you want a fixed TZ
-    }).format(date);
-  } catch {
-    const hh = String(date.getHours()).padStart(2, '0');
-    const mm = String(date.getMinutes()).padStart(2, '0');
-    return `${hh}:${mm}`;
-  }
-}
-
 export default async function handler(req, res) {
-  const { origin, destination, tz, h12 } = req.query;
+  const { origin, destination } = req.query;
   if (!origin || !destination) {
     return res.status(400).json({ error: 'Missing origin or destination' });
   }
@@ -33,19 +18,16 @@ export default async function handler(req, res) {
 
       const now = new Date();
       const baseMs =
-        Number.isFinite(leg?.arrival_time?.value)
+        leg?.arrival_time?.value
           ? leg.arrival_time.value * 1000
-          : Number.isFinite(durationSeconds)
+          : durationSeconds != null
             ? now.getTime() + durationSeconds * 1000
             : now.getTime();
 
       const arrivalTime = new Date(baseMs);
-
-      // Preferred formatting: HH:MM with no seconds
-      const text_24h = formatHHMM(arrivalTime, { hour12: false, timeZone: tz });
-      const text_12h = formatHHMM(arrivalTime, { hour12: true, timeZone: tz });
-      // If caller passed h12=1, use 12-hour for the default text; otherwise 24-hour
-      const text = h12 === '1' ? text_12h : text_24h;
+      const hh = String(arrivalTime.getHours()).padStart(2, '0');
+      const mm = String(arrivalTime.getMinutes()).padStart(2, '0');
+      const arrivalHHMM = `${hh}:${mm}`;
 
       const durationInTraffic = leg?.duration_in_traffic?.value;
       const normalDuration = leg?.duration?.value;
@@ -54,6 +36,7 @@ export default async function handler(req, res) {
 
       let trafficMessage = '';
       let trafficSeverity = 'none';
+
       if (hasTraffic) {
         if (trafficDelay <= 5) {
           trafficMessage = 'Light traffic - minimal delays expected';
@@ -79,10 +62,8 @@ export default async function handler(req, res) {
         duration: leg?.duration?.text,
         duration_seconds: Number.isFinite(leg?.duration?.value) ? leg.duration.value : null,
         arrival_time: {
-          text,             // strictly HH:MM (either 24h or 12h per h12 flag)
-          text_24h,
-          text_12h,
-          timestamp: arrivalTime.getTime(),
+          text: arrivalHHMM,              // strictly HH:MM
+          timestamp: arrivalTime.getTime(), // ms epoch (kept for compatibility)
           iso: arrivalTime.toISOString()
         },
         traffic: {
